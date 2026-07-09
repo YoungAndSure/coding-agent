@@ -13,5 +13,7 @@ node_modules/
 .idea/
 .DS_Store
 
-# Agent 本地缓存/数据库(每个用户/机器独立)
-.codeagent/
+# SQLite WAL/锁文件（不跟踪主库）
+.codeagent/*.sql-wal
+.codeagent/*.sql-shm
+.codeagent/*.sql-journal
