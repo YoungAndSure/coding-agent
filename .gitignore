@@ -12,3 +12,6 @@ node_modules/
 .vscode/
 .idea/
 .DS_Store
+
+# Agent 本地缓存/数据库(每个用户/机器独立)
+.codeagent/

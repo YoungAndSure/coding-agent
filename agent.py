@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import chat  # 复用 resolve_settings / make_client
+from contexts.base import ContextBuilder
+from contexts.memory import RecentConversationsContext
 
 
 # ---------- 工具实现 ----------
@@ -152,6 +154,35 @@ SYSTEM_PROMPT = (
     "Use tools when they help. When you have a complete answer, just write it in plain text. "
     "Keep answers concise."
 )
+
+
+# ---------- Context 拼接 ----------
+# 默认 contexts 列表:逐个调用 .build() 拿到一段文本,append 到一起,
+# 拼到 system prompt 前面喂给 LLM。
+DEFAULT_CONTEXTS: list[ContextBuilder] = [
+    RecentConversationsContext(limit=10),
+]
+
+def build_contexts(contexts: list[ContextBuilder] | None = None) -> str:
+    """遍历 contexts,逐个调用 render(),把结果 append 到一起。
+
+    任一 context 抛异常时,降级为空串,不影响主流程。
+    """
+    items = contexts if contexts is not None else DEFAULT_CONTEXTS
+    chunks: list[str] = []
+    for c in items:
+        try:
+            rendered = c.render()
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(
+                f"[contexts] {type(c).__name__} build failed: "
+                f"{type(e).__name__}: {e}\n"
+            )
+            continue
+        if rendered:
+            chunks.append(rendered)
+    return "\n\n".join(chunks)
+
 
 
 # ---------- 记忆系统 ----------
@@ -404,6 +435,7 @@ def agent_loop(
     max_iters: int = 50,
     system: str = SYSTEM_PROMPT,
     verbose: bool = True,
+    contexts: list[ContextBuilder] | None = None,
 ) -> str:
     """
     跑完整 tool-use 循环，返回最后一条纯文本回答。
@@ -421,19 +453,32 @@ def agent_loop(
         if verbose:
             print(f"\n[iter {i}/{max_iters}] >>> model", file=sys.stderr)
 
-        # 记忆: 记录即将发送给 LLM 的内容
+        # 1) 拼接 contexts:逐个调用每个 context builder,把结果 append 到一起
+        ctx_text = build_contexts(contexts)
+        if ctx_text:
+            full_system = (system + "\n\n" + ctx_text).strip()
+        else:
+            full_system = system
+        if verbose and ctx_text:
+            print(
+                f"[contexts] injected {len(ctx_text)} chars from "
+                f"{len(DEFAULT_CONTEXTS)} builder(s)",
+                file=sys.stderr,
+            )
+
+        # 记忆: 记录即将发送给 LLM 的内容(含 contexts 拼接结果)
         _append_memory({
             "kind": "request",
             "iter": i,
             "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
-            "system": system,
+            "system": full_system,
             "messages": _summarize_messages(messages),
         })
 
         resp = client.messages.create(
             model=model,
             max_tokens=2048,
-            system=system,
+            system=full_system,
             tools=TOOLS_SPEC,
             messages=messages,
         )
@@ -505,14 +550,18 @@ def main():
     ap.add_argument("prompt", help="User prompt")
     ap.add_argument("--max-iters", type=int, default=50)
     ap.add_argument("--quiet", action="store_true", help="suppress per-iter stderr logs")
+    ap.add_argument("--no-contexts", action="store_true",
+                    help="disable context builders (skip memory recall etc.)")
     args = ap.parse_args()
 
     env, _ = chat.resolve_settings()
     client, model = chat.make_client(env)
+    ctxs: list[ContextBuilder] | None = [] if args.no_contexts else None
     final = agent_loop(
         client, model, args.prompt,
         max_iters=args.max_iters,
         verbose=not args.quiet,
+        contexts=ctxs,
     )
     print(final)
 
