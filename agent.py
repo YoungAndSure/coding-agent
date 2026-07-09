@@ -152,6 +152,77 @@ SYSTEM_PROMPT = (
 )
 
 
+# ---------- 记忆系统 ----------
+MEMORY_DIR = Path.cwd() / ".codeagent"
+MEMORY_FILE = MEMORY_DIR / "memory.json"
+
+
+def _ensure_memory() -> None:
+    """确保 .codeagent/memory.json 存在;不存在则创建。"""
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    if not MEMORY_FILE.exists():
+        MEMORY_FILE.write_text("[]", encoding="utf-8")
+
+
+def _append_memory(entry: dict) -> None:
+    """把一条记录 append 到 .codeagent/memory.json 末尾。"""
+    _ensure_memory()
+    try:
+        raw = MEMORY_FILE.read_text(encoding="utf-8") or "[]"
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            data = []
+    except (json.JSONDecodeError, OSError):
+        data = []
+    data.append(entry)
+    MEMORY_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _summarize_messages(messages: list) -> list:
+    """把 messages 压成可序列化的小条目,便于写入 memory.json。"""
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, str):
+            text = content
+            blocks = None
+        else:
+            blocks = content if isinstance(content, list) else None
+            text = "\n".join(
+                b.get("text", "") for b in (blocks or []) if isinstance(b, dict) and b.get("type") == "text"
+            )
+        item = {"role": m.get("role"), "text": text}
+        if blocks:
+            item["blocks"] = blocks
+        out.append(item)
+    return out
+
+
+def _summarize_response(resp) -> dict:
+    """把一次 messages.create 的响应压成可序列化的 dict。"""
+    try:
+        blocks = extract_blocks(resp)
+    except Exception:  # noqa: BLE001
+        blocks = []
+    usage = getattr(resp, "usage", None)
+    return {
+        "stop_reason": getattr(resp, "stop_reason", None),
+        "model": getattr(resp, "model", None),
+        "usage": (
+            {
+                "input_tokens": getattr(usage, "input_tokens", None),
+                "output_tokens": getattr(usage, "output_tokens", None),
+            }
+            if usage is not None
+            else None
+        ),
+        "blocks": blocks,
+    }
+
+
 # ---------- 工具执行 ----------
 def run_tool(call: dict) -> tuple[str, str | None]:
     """
@@ -198,7 +269,7 @@ def agent_loop(
     model: str,
     user_prompt: str,
     *,
-    max_iters: int = 10,
+    max_iters: int = 50,
     system: str = SYSTEM_PROMPT,
     verbose: bool = True,
 ) -> str:
@@ -218,6 +289,15 @@ def agent_loop(
         if verbose:
             print(f"\n[iter {i}/{max_iters}] >>> model", file=sys.stderr)
 
+        # 记忆: 记录即将发送给 LLM 的内容
+        _append_memory({
+            "kind": "request",
+            "iter": i,
+            "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+            "system": system,
+            "messages": _summarize_messages(messages),
+        })
+
         resp = client.messages.create(
             model=model,
             max_tokens=2048,
@@ -225,6 +305,14 @@ def agent_loop(
             tools=TOOLS_SPEC,
             messages=messages,
         )
+
+        # 记忆: 记录 LLM 返回的内容
+        _append_memory({
+            "kind": "response",
+            "iter": i,
+            "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+            "response": _summarize_response(resp),
+        })
 
         blocks = extract_blocks(resp)
         tool_calls = [b for b in blocks if b["type"] == "tool_use"]
