@@ -102,7 +102,7 @@ function App() {
             value={draft}
             onChange={setDraft}
             onSubmit={onSubmit}
-            placeholder="ask the agent…"
+            placeholder=""
           />
         )}
       </Box>
