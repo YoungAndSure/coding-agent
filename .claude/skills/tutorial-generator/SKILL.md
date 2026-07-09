@@ -35,18 +35,26 @@ User phrases that should trigger this skill:
 
 2. **Anchor style**: Read the latest lesson to internalize the established format. Conventions are not invented per-lesson — they evolve incrementally from prior lessons.
 
-3. **Identify the gap**: What's been built/changed since the previous lesson?
-   - `git log --since=<date-of-previous-lesson>` for commits
-   - Diff of files (added/modified/deleted)
-   - Conversation history for the reasoning chain
-   - New tests, configs, schemas, doc files
+3. **Identify the gap by combining FOUR sources**. Each source captures a different signal; cross-reference them rather than reading any one in isolation:
 
-4. **Extract the reasoning chain**, not just the artifacts:
-   - What question surfaced the next step?
-   - What alternatives were considered?
-   - Why was a particular path chosen?
-   - What was tried and rolled back?
-   - What insights emerged?
+   | Source | What it carries | When it shines |
+   |---|---|---|
+   | `git log --since=<date-of-previous-lesson>` | Boundary events (commits) | Anchors lessons to concrete artifacts |
+   | File diff (added/modified/deleted) in the working tree | Structural change | Reveals shape of what's new vs what's left out |
+   | **Conversation history** (user ↔ agent during the period) | **What triggered each move**, pushback, redirection | Tells you "why this iteration, why now" |
+   | **`.codeagent/memory.sql` + `.codeagent/memory.json`** | Every request/response the agent handled, persisted even if no commit happened | Catches abandoned attempts, false starts, repeated corrections that didn't reach commits |
+
+   The conversation history and `.codeagent/memory` are **primary** — git log alone misses the dead ends. The user often rewrites decisions 2–3 times before committing; only the conversation logs show that loop.
+
+4. **Extract the thought process**, not just the decision. For each iteration in the gap, capture:
+   - **What question surfaced the next step** (paraphrase the trigger)
+   - **Why this question arose at that moment** (what was just discovered, just built, just pushed back on)
+   - **What alternatives were considered** (the ones the user named, not invented retro-rationalizations)
+   - **What was tried and abandoned** (greatest predictor of what's "settled" vs "still movable")
+   - **What insight landed** — call those out
+   - **What the user pushed back on, and how the answer shifted**
+
+   The goal is not "decisions" — it is **the texture of how thinking moved**. A reader agent should be able to predict, after reading the lesson, what the user might ask next.
 
 5. **Write `docs/{NN+1}.md`** following the conventions established in `docs/01.md`:
 
@@ -74,6 +82,11 @@ User phrases that should trigger this skill:
 ## Writing philosophy (non-negotiable)
 
 These rules are the user's hard requirements. Skill-loaded agents must follow them.
+
+### Record the thought process, not just the artifacts
+- The reader is an agent that loads the doc to **predict what comes next** and to **continue building consistently**.
+- A reader who only knows "we built X" can't decide whether to invest in changing it; a reader who knows "we built X after the user pushed back twice on Y" can.
+- When the conversation shows the user thinking out loud, paraphrasing, correcting, reframing — **preserve that texture**. It is the value of the doc.
 
 ### The reader is an agent, not a tutorial-following human
 - Write so that an LLM loading the doc can think through what's next, decide what's missing, and execute on the gaps.
