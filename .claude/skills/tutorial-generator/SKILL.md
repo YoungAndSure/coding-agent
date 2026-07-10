@@ -42,7 +42,7 @@ User phrases that should trigger this skill:
    | `git log --since=<date-of-previous-lesson>` | Boundary events (commits) | Anchors lessons to concrete artifacts |
    | File diff (added/modified/deleted) in the working tree | Structural change | Reveals shape of what's new vs what's left out |
    | **Conversation history** (user ↔ agent during the period) | **What triggered each move**, pushback, redirection | Tells you "why this iteration, why now" |
-   | **`.codeagent/memory.sql` + `.codeagent/memory.json`** | Every request/response the agent handled, persisted even if no commit happened | Catches abandoned attempts, false starts, repeated corrections that didn't reach commits |
+   | **`.codeagent/session.sql` + `.codeagent/session.json`** | Every request/response the agent handled, persisted even if no commit happened | Catches abandoned attempts, false starts, repeated corrections that didn't reach commits |
 
    The conversation history and `.codeagent/memory` are **primary** — git log alone misses the dead ends. The user often rewrites decisions 2–3 times before committing; only the conversation logs show that loop.
 

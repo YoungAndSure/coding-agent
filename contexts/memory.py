@@ -1,10 +1,10 @@
-"""contexts.memory - 从 memory.sql 里捞最近 10 条对话,作为 context 喂给 LLM。
+"""contexts.memory - 从 session.sql 里捞最近 10 条对话,作为 context 喂给 LLM。
 
 约定:
     - 继承 base.ContextBuilder
     - title = "recent conversations"
     - build() 返回一段纯文本,列出最近 10 条 (request, response) 对话
-    - 只读 memory.sql,失败时返回空串,不影响主流程
+    - 只读 session.sql,失败时返回空串,不影响主流程
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def _get_sql_conn():
 
 
 class RecentConversationsContext(ContextBuilder):
-    """从 memory.sql 里查询最近 10 条对话,按时间倒序展示。"""
+    """从 session.sql 里查询最近 10 条对话,按时间倒序展示。"""
 
     title = "recent conversations"
 

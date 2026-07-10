@@ -161,8 +161,8 @@ def build_contexts(contexts: list[ContextBuilder] | None = None) -> str:
 
 # ---------- 记忆系统 ----------
 MEMORY_DIR = Path.cwd() / ".codeagent"
-MEMORY_FILE = MEMORY_DIR / "memory.json"
-MEMORY_SQL = MEMORY_DIR / "memory.sql"  # SQLite 数据库 (单文件,后缀 .sql 仅约定)
+MEMORY_FILE = MEMORY_DIR / "session.json"
+MEMORY_SQL = MEMORY_DIR / "session.sql"  # SQLite 数据库 (单文件,后缀 .sql 仅约定)
 
 _SQL_LOCK = threading.Lock()
 _SQL_CONN: sqlite3.Connection | None = None
@@ -201,7 +201,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_iter ON messages(iter);
 
 
 def _ensure_memory() -> None:
-    """确保 .codeagent/memory.json 与 .codeagent/memory.sql 都存在。"""
+    """确保 .codeagent/session.json 与 .codeagent/session.sql 都存在。"""
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     if not MEMORY_FILE.exists():
         MEMORY_FILE.write_text("[]", encoding="utf-8")
@@ -288,11 +288,11 @@ def _sql_insert_entry(entry: dict, payload_text: str) -> None:
             )
         conn.commit()
     except Exception as e:  # noqa: BLE001 - SQL 是辅助存储,失败不应影响主流程
-        sys.stderr.write("[memory.sql] write failed: " + type(e).__name__ + ": " + str(e) + chr(10))
+        sys.stderr.write("[session.sql] write failed: " + type(e).__name__ + ": " + str(e) + chr(10))
 
 
 def _append_memory(entry: dict) -> None:
-    """把一条记录 append 到 .codeagent/memory.json,同步落库到 memory.sql。"""
+    """把一条记录 append 到 .codeagent/session.json,同步落库到 session.sql。"""
     _ensure_memory()
     try:
         raw = MEMORY_FILE.read_text(encoding="utf-8") or "[]"
@@ -319,7 +319,7 @@ def query_memory(sql: str, params: Iterable = ()) -> list[tuple]:
 
 
 def _summarize_messages(messages: list) -> list:
-    """把 messages 压成可序列化的小条目,便于写入 memory.json。"""
+    """把 messages 压成可序列化的小条目,便于写入 session.json。"""
     out = []
     for m in messages:
         content = m.get("content")
