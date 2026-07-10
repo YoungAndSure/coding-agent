@@ -3,7 +3,7 @@
 agent.py - MiniMax 上的工具调用 agent 循环
 
 复用 chat.py 的配置加载与客户端构造。在它之上加：
-  1. 一组内置工具（bash / read_file / calc / current_time）
+  1. 一组内置工具（bash / read_file / current_time）
   2. Anthropic tool-use 循环：
        - 若响应含 tool_use 块 → 执行 → 把 tool_result 回灌 → 再请求
        - 直到 end_turn 或 max_iters
@@ -75,20 +75,6 @@ def tool_read_file(input_: dict) -> str:
         return f"[read_file] is a directory: {p}"
 
 
-def tool_calc(input_: dict) -> str:
-    """受限 eval：算术 / 列表 / 字典等表达式；不允许 import 或访问危险属性。"""
-    expr = input_.get("expr", "")
-    if not expr:
-        return "[calc] empty expr"
-    try:
-        # 清掉内置；通过 __class__/__mro__ 的 gadget chain 仍可能漏，
-        # 仅适合本机 demo，**不要用于不可信输入**。
-        # noqa: S307 - 故意在受控环境里 eval
-        return str(eval(expr, {"__builtins__": {}}))
-    except Exception as e:  # noqa: BLE001 - 把所有异常当字符串还回去
-        return f"[calc error] {type(e).__name__}: {e}"
-
-
 def tool_current_time(_input: dict) -> str:
     return _dt.datetime.now().isoformat(timespec="seconds")
 
@@ -124,17 +110,6 @@ TOOLS_SPEC: list[dict] = [
         },
     },
     {
-        "name": "calc",
-        "description": "Evaluate a Python expression (arithmetic, list, dict, etc.) and return its repr.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "expr": {"type": "string", "description": "Python expression"},
-            },
-            "required": ["expr"],
-        },
-    },
-    {
         "name": "current_time",
         "description": "Return current local time as an ISO 8601 string.",
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -145,7 +120,6 @@ TOOLS_SPEC: list[dict] = [
 TOOL_RUNNERS: dict[str, Callable[[dict], str]] = {
     "bash": tool_bash,
     "read_file": tool_read_file,
-    "calc": tool_calc,
     "current_time": tool_current_time,
 }
 
