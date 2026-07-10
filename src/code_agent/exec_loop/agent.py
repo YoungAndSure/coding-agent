@@ -30,9 +30,15 @@ import threading
 from pathlib import Path
 from typing import Callable, Iterable
 
-import chat  # 复用 resolve_settings / make_client
-from contexts.base import ContextBuilder
-from contexts.memory import RecentConversationsContext
+# 让 `from code_agent.X import Y` 在任何 cwd 下都能工作 —— 把 src/ 加进 sys.path。
+# 路径布局: this_file → src/code_agent/exec_loop/agent.py → 上溯 3 层到 src。
+_SRC = Path(__file__).resolve().parent.parent.parent
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from code_agent.llm import chat  # 复用 resolve_settings / make_client
+from code_agent.contexts.base import ContextBuilder
+from code_agent.contexts.memory import RecentConversationsContext
 
 
 # ---------- 工具实现 ----------

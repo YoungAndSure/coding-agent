@@ -5,7 +5,7 @@
   "private": true,
   "description": "Minimal Ink TUI that drives agent.py over stdin/stdout",
   "scripts": {
-    "start": "tsx tui.jsx"
+    "start": "tsx src/code_agent/tui/tui.jsx"
   },
   "dependencies": {
     "ink": "^5.0.1",

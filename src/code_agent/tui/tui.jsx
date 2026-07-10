@@ -44,7 +44,7 @@ function App() {
     // 2) 开一个 agent.py 子进程（这就是"前后端"——只是用 fork/exec 通信）
     let stdout = '', stderr = '';
     try {
-      const child = spawn('python3', ['agent.py', '--quiet', prompt], {
+      const child = spawn('python3', ['src/code_agent/exec_loop/agent.py', '--quiet', prompt], {
         cwd: process.cwd(),
       });
       child.stdout.on('data', (c) => { stdout += c; });
