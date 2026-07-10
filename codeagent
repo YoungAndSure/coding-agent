@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# codeagent — 一键启动 coding-agent TUI
+# 用法: codeagent [额外参数...]
+
+set -euo pipefail
+
+# 定位脚本自身所在目录(支持软链)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+    SOURCE=$(readlink "$SOURCE")
+    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+
+cd "$SCRIPT_DIR"
+
+# 彩蛋颜色
+if [ -t 1 ]; then
+    C_BOLD=$'\033[1m'
+    C_CYAN=$'\033[36m'
+    C_DIM=$'\033[2m'
+    C_RST=$'\033[0m'
+else
+    C_BOLD=""; C_CYAN=""; C_DIM=""; C_RST=""
+fi
+
+# 1. 依赖检查
+need_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "${C_BOLD}✗ 缺少依赖:${C_RST} $1  (请先安装)" >&2
+        exit 1
+    fi
+}
+
+need_cmd node
+need_cmd npm
+
+# 2. 第一次跑? 自动 npm install
+if [ ! -d node_modules ]; then
+    echo "${C_DIM}» 首次运行,正在安装依赖 (npm install)...${C_RST}"
+    npm install --no-audit --no-fund --loglevel=error
+    echo
+fi
+
+# 3. 漂亮 banner
+echo "${C_CYAN}${C_BOLD}"
+cat <<'EOF'
+   ┌─────────────────────────────────┐
+   │   codeagent · coding agent TUI  │
+   └─────────────────────────────────┘
+EOF
+echo "${C_RST}${C_DIM}   退出: Ctrl-C${C_RST}"
+echo
+
+# 4. 把 args 透传给 npm start
+exec npm start --silent -- "$@"
