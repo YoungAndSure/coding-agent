@@ -166,9 +166,14 @@ def build_contexts(contexts: list[ContextBuilder] | None = None) -> str:
 
 
 # ---------- 记忆系统 ----------
-MEMORY_DIR = Path.cwd() / ".codeagent"
+# 记忆目录放在用户家目录下,而不是当前项目目录 —— 跨项目复用会话历史,
+# 避免在每个 repo 下都生成一份 .codeagent,也避免误提交运行期状态。
+MEMORY_DIR = Path.home() / ".codeagent"
 MEMORY_FILE = MEMORY_DIR / "session.json"
 MEMORY_SQL = MEMORY_DIR / "session.sql"  # SQLite 数据库 (单文件,后缀 .sql 仅约定)
+
+_LEGACY_DIR = Path.cwd() / ".codeagent"  # 旧版本写在 cwd 下,启动时一次性迁移
+_LEGACY_MIGRATED_FLAG = MEMORY_DIR / ".migrated_from_cwd"
 
 _SQL_LOCK = threading.Lock()
 _SQL_CONN: sqlite3.Connection | None = None
@@ -206,9 +211,69 @@ CREATE INDEX IF NOT EXISTS idx_msg_iter ON messages(iter);
 """
 
 
-def _ensure_memory() -> None:
-    """确保 .codeagent/session.json 与 .codeagent/session.sql 都存在。"""
+def _migrate_legacy_memory() -> None:
+    """把旧版本写在 cwd/.codeagent 下的 session.json 与 session.sql 迁到 ~/.codeagent。
+
+    设计:
+      - 只在新位置 .migrated_from_cwd 标志文件不存在时执行,确保幂等。
+      - 用户家目录下可能已有数据(比如不同项目共用 ~/.codeagent),这时候跳过旧文件,
+        避免覆盖新用户的历史。
+      - 旧 .codeagent 目录里可能还有 wal/shm/journal,一并搬走再清理。
+    """
+    if _LEGACY_MIGRATED_FLAG.exists():
+        return
+    legacy_dir = _LEGACY_DIR
+    if not legacy_dir.is_dir():
+        # 旧目录都不存在,直接打标走人
+        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        _LEGACY_MIGRATED_FLAG.touch()
+        return
+
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 只在目标文件还不存在时,才覆盖式搬动 —— 保护既有 ~/.codeagent 数据
+    targets = ["session.json", "session.sql", "session.sql-wal", "session.sql-shm", "session.sql-journal"]
+    moved_any = False
+    for name in targets:
+        src = legacy_dir / name
+        dst = MEMORY_DIR / name
+        if not src.exists():
+            continue
+        if dst.exists():
+            continue
+        try:
+            src.replace(dst)
+            moved_any = True
+        except OSError as e:
+            sys.stderr.write(
+                f"[migration] move {src} -> {dst} failed: "
+                f"{type(e).__name__}: {e}\n"
+            )
+
+    # 搬迁后再清空/删除旧目录(空目录直接 rmdir,非空只能 ignore)
+    try:
+        for child in legacy_dir.iterdir():
+            try:
+                if child.is_file():
+                    child.unlink()
+            except OSError:
+                pass
+        try:
+            legacy_dir.rmdir()
+        except OSError:
+            pass
+    except FileNotFoundError:
+        pass
+
+    if moved_any:
+        sys.stderr.write(f"[migration] legacy memory moved to {MEMORY_DIR}\n")
+    _LEGACY_MIGRATED_FLAG.touch()
+
+
+def _ensure_memory() -> None:
+    """确保 ~/.codeagent/session.json 与 ~/.codeagent/session.sql 都存在。"""
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_memory()
     if not MEMORY_FILE.exists():
         MEMORY_FILE.write_text("[]", encoding="utf-8")
     _get_sql_conn()  # 触发建表
@@ -298,7 +363,7 @@ def _sql_insert_entry(entry: dict, payload_text: str) -> None:
 
 
 def _append_memory(entry: dict) -> None:
-    """把一条记录 append 到 .codeagent/session.json,同步落库到 session.sql。"""
+    """把一条记录 append 到 ~/.codeagent/session.json,同步落库到 ~/.codeagent/session.sql。"""
     _ensure_memory()
     try:
         raw = MEMORY_FILE.read_text(encoding="utf-8") or "[]"

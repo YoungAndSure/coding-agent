@@ -16,9 +16,11 @@ def _get_sql_conn():
     """延迟导入 agent._get_sql_conn,避免 contexts.memory <-> agent 循环依赖。
 
     只在 build() 真正被调用时才 import,届时 agent.py 早已加载完毕。
+    用绝对包路径 code_agent.exec_loop.agent,而不是裸 `agent`,
+    这样无论 cwd 在哪,Python 都能找到同一个模块实例。
     """
     try:
-        from agent import _get_sql_conn as _fn  # type: ignore
+        from code_agent.exec_loop.agent import _get_sql_conn as _fn  # type: ignore
         return _fn
     except Exception:
         return None
