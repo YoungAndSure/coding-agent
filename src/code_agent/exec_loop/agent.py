@@ -23,10 +23,8 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
-import sqlite3
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -170,46 +168,9 @@ def build_contexts(contexts: list[ContextBuilder] | None = None) -> str:
 # 避免在每个 repo 下都生成一份 .codeagent,也避免误提交运行期状态。
 MEMORY_DIR = Path.home() / ".codeagent"
 MEMORY_FILE = MEMORY_DIR / "session.json"
-MEMORY_SQL = MEMORY_DIR / "session.sql"  # SQLite 数据库 (单文件,后缀 .sql 仅约定)
 
 _LEGACY_DIR = Path.cwd() / ".codeagent"  # 旧版本写在 cwd 下,启动时一次性迁移
 _LEGACY_MIGRATED_FLAG = MEMORY_DIR / ".migrated_from_cwd"
-
-_SQL_LOCK = threading.Lock()
-_SQL_CONN: sqlite3.Connection | None = None
-
-_MEMORY_SCHEMA = """
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS conversations (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    iter         INTEGER NOT NULL,
-    kind         TEXT    NOT NULL CHECK(kind IN ('request','response')),
-    timestamp    TEXT    NOT NULL,
-    system       TEXT,
-    payload      TEXT    NOT NULL,
-    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_conv_iter ON conversations(iter);
-CREATE INDEX IF NOT EXISTS idx_conv_kind ON conversations(kind);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    iter            INTEGER NOT NULL,
-    kind            TEXT    NOT NULL,
-    role            TEXT,
-    seq             INTEGER NOT NULL,
-    text            TEXT,
-    blocks_json     TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_msg_iter ON messages(iter);
-"""
-
 
 def _migrate_legacy_memory() -> None:
     """把旧版本写在 cwd/.codeagent 下的 session.json 与 session.sql 迁到 ~/.codeagent。
@@ -232,7 +193,7 @@ def _migrate_legacy_memory() -> None:
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
     # 只在目标文件还不存在时,才覆盖式搬动 —— 保护既有 ~/.codeagent 数据
-    targets = ["session.json", "session.sql", "session.sql-wal", "session.sql-shm", "session.sql-journal"]
+    targets = ["session.json"]
     moved_any = False
     for name in targets:
         src = legacy_dir / name
@@ -271,99 +232,15 @@ def _migrate_legacy_memory() -> None:
 
 
 def _ensure_memory() -> None:
-    """确保 ~/.codeagent/session.json 与 ~/.codeagent/session.sql 都存在。"""
+    """确保 ~/.codeagent/session.json 存在。"""
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     _migrate_legacy_memory()
     if not MEMORY_FILE.exists():
         MEMORY_FILE.write_text("[]", encoding="utf-8")
-    _get_sql_conn()  # 触发建表
-
-
-def _get_sql_conn() -> sqlite3.Connection:
-    """获取(或懒初始化)SQLite 连接。进程内单例,线程安全。"""
-    global _SQL_CONN
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    with _SQL_LOCK:
-        if _SQL_CONN is None:
-            _SQL_CONN = sqlite3.connect(str(MEMORY_SQL), check_same_thread=False)
-            _SQL_CONN.executescript(_MEMORY_SCHEMA)
-            _SQL_CONN.commit()
-        return _SQL_CONN
-
-
-def _sql_insert_entry(entry: dict, payload_text: str) -> None:
-    """把一条记忆条目写进 SQLite。失败不阻塞 JSON 主流程。"""
-    try:
-        conn = _get_sql_conn()
-        kind = entry.get("kind", "")
-        cur = conn.execute(
-            "INSERT INTO conversations(iter, kind, timestamp, system, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                int(entry.get("iter", 0)),
-                kind,
-                entry.get("timestamp", ""),
-                entry.get("system"),
-                payload_text,
-            ),
-        )
-        conv_id = cur.lastrowid
-
-        rows: list[tuple] = []
-        if kind == "request":
-            for seq, m in enumerate(entry.get("messages") or []):
-                if not isinstance(m, dict):
-                    continue
-                rows.append((
-                    conv_id,
-                    int(entry.get("iter", 0)),
-                    kind,
-                    m.get("role"),
-                    seq,
-                    m.get("text"),
-                    json.dumps(m.get("blocks"), ensure_ascii=False) if m.get("blocks") else None,
-                ))
-        elif kind == "response":
-            resp = entry.get("response") or {}
-            usage = resp.get("usage") or {}
-            # response 没有按 message 拆开,但 blocks 数组本身就是顺序的
-            for seq, b in enumerate(resp.get("blocks") or []):
-                if not isinstance(b, dict):
-                    continue
-                rows.append((
-                    conv_id,
-                    int(entry.get("iter", 0)),
-                    kind,
-                    "assistant",
-                    seq,
-                    b.get("text"),
-                    json.dumps(b, ensure_ascii=False) if b.get("type") != "text" else None,
-                ))
-            # 额外把 usage 记到 text 字段,便于 grep
-            if usage:
-                rows.append((
-                    conv_id,
-                    int(entry.get("iter", 0)),
-                    kind + "_usage",
-                    None,
-                    len(rows),
-                    json.dumps(usage, ensure_ascii=False),
-                    None,
-                ))
-
-        if rows:
-            conn.executemany(
-                "INSERT INTO messages(conversation_id, iter, kind, role, seq, text, blocks_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rows,
-            )
-        conn.commit()
-    except Exception as e:  # noqa: BLE001 - SQL 是辅助存储,失败不应影响主流程
-        sys.stderr.write("[session.sql] write failed: " + type(e).__name__ + ": " + str(e) + chr(10))
 
 
 def _append_memory(entry: dict) -> None:
-    """把一条记录 append 到 ~/.codeagent/session.json,同步落库到 ~/.codeagent/session.sql。"""
+    """把一条记录 append 到 ~/.codeagent/session.json。失败不阻塞主流程。"""
     _ensure_memory()
     try:
         raw = MEMORY_FILE.read_text(encoding="utf-8") or "[]"
@@ -372,21 +249,16 @@ def _append_memory(entry: dict) -> None:
             data = []
     except (json.JSONDecodeError, OSError):
         data = []
-    data.append(entry)
-    payload_text = json.dumps(entry, ensure_ascii=False, indent=2)
-    MEMORY_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    # 同步写入 SQL
-    _sql_insert_entry(entry, payload_text)
+    try:
+        data.append(entry)
+        MEMORY_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as e:  # noqa: BLE001 - 写失败不阻塞主流程
+        sys.stderr.write("[session.json] write failed: " + type(e).__name__ + ": " + str(e) + chr(10))
 
 
-def query_memory(sql: str, params: Iterable = ()) -> list[tuple]:
-    """只读便捷查询(供调试 / 脚本使用)。"""
-    conn = _get_sql_conn()
-    cur = conn.execute(sql, tuple(params))
-    return cur.fetchall()
 
 
 def _summarize_messages(messages: list) -> list:
