@@ -26,12 +26,12 @@ class RecentConversationsContext(ContextBuilder):
 
     def build(self) -> str:
         try:
-            from code_agent.exec_loop.agent import MEMORY_FILE
+            from code_agent.exec_loop.agent import SESSION_FILE
         except Exception:
             return ""
 
         try:
-            raw = Path(MEMORY_FILE).read_text(encoding="utf-8") or "[]"
+            raw = Path(SESSION_FILE).read_text(encoding="utf-8") or "[]"
             data = json.loads(raw)
         except (OSError, json.JSONDecodeError, ValueError, TypeError):
             return ""

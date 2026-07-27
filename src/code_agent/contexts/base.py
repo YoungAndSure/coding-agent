@@ -25,8 +25,5 @@ class ContextBuilder:
         raise NotImplementedError
 
     def render(self) -> str:
-        """带标题的渲染结果。空内容时返回空串,避免污染 prompt。"""
-        body = (self.build() or "").strip()
-        if not body:
-            return ""
-        return f"--- {self.title} ---\n{body}"
+        """返回 build() 的纯文本。LLM 不需要 markdown 装饰;空内容返回空串。"""
+        return (self.build() or "").strip()

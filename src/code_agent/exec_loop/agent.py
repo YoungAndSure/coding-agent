@@ -142,7 +142,7 @@ DEFAULT_CONTEXTS: list[ContextBuilder] = [
 ]
 
 def build_contexts(contexts: list[ContextBuilder] | None = None) -> str:
-    """遍历 contexts,逐个调用 render(),把结果 append 到一起。
+    """遍历 contexts,逐个调用 render(),把纯文本用空行拼起来。
 
     任一 context 抛异常时,降级为空串,不影响主流程。
     """
@@ -163,87 +163,81 @@ def build_contexts(contexts: list[ContextBuilder] | None = None) -> str:
 
 
 
-# ---------- 记忆系统 ----------
-# 记忆目录放在用户家目录下,而不是当前项目目录 —— 跨项目复用会话历史,
-# 避免在每个 repo 下都生成一份 .codeagent,也避免误提交运行期状态。
-MEMORY_DIR = Path.home() / ".codeagent"
-MEMORY_FILE = MEMORY_DIR / "session.json"
+# ---------- Session 系统 ----------
+# 设计: 每次启动 = 一个新 session,放 ~/.codeagent/projects/<sanitize-cwd>/<timestamp>/session.json。
+#      - 项目目录: abs_cwd 把 / 替成 - (保留前导 -,因为绝对路径以 / 开头)
+#      - session id: 微秒级时间戳,YYYY-MM-DD-HHMMSS-microseconds,字典序就是时间序
+#      - 每次默认开新 session,不接续(不实现 --continue / --resume)
+#
+# 这两个变量在 main() 里被覆盖;这里只是占位,让模块能 import。
+SESSION_DIR: Path = Path.home() / ".codeagent"
+SESSION_FILE: Path = SESSION_DIR / "session.json"
 
-_LEGACY_DIR = Path.cwd() / ".codeagent"  # 旧版本写在 cwd 下,启动时一次性迁移
-_LEGACY_MIGRATED_FLAG = MEMORY_DIR / ".migrated_from_cwd"
 
-def _migrate_legacy_memory() -> None:
-    """把旧版本写在 cwd/.codeagent 下的 session.json 与 session.sql 迁到 ~/.codeagent。
+def _project_key(abs_cwd: str) -> str:
+    """把绝对 cwd 编码成目录名。
 
-    设计:
-      - 只在新位置 .migrated_from_cwd 标志文件不存在时执行,确保幂等。
-      - 用户家目录下可能已有数据(比如不同项目共用 ~/.codeagent),这时候跳过旧文件,
-        避免覆盖新用户的历史。
-      - 旧 .codeagent 目录里可能还有 wal/shm/journal,一并搬走再清理。
+    简单: 把 / 替成 -,其他非 [a-zA-Z0-9_-.] 也替成 -。
+    保留前导 -,因为绝对路径以 / 开头。
     """
-    if _LEGACY_MIGRATED_FLAG.exists():
-        return
-    legacy_dir = _LEGACY_DIR
-    if not legacy_dir.is_dir():
-        # 旧目录都不存在,直接打标走人
-        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        _LEGACY_MIGRATED_FLAG.touch()
-        return
+    return "".join(
+        c if (c.isalnum() or c in "-_.") else "-"
+        for c in abs_cwd
+    )
 
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 只在目标文件还不存在时,才覆盖式搬动 —— 保护既有 ~/.codeagent 数据
-    targets = ["session.json"]
-    moved_any = False
-    for name in targets:
-        src = legacy_dir / name
-        dst = MEMORY_DIR / name
-        if not src.exists():
-            continue
-        if dst.exists():
-            continue
-        try:
-            src.replace(dst)
-            moved_any = True
-        except OSError as e:
-            sys.stderr.write(
-                f"[migration] move {src} -> {dst} failed: "
-                f"{type(e).__name__}: {e}\n"
-            )
+def _projects_root() -> Path:
+    return Path.home() / ".codeagent" / "projects"
 
-    # 搬迁后再清空/删除旧目录(空目录直接 rmdir,非空只能 ignore)
-    try:
-        for child in legacy_dir.iterdir():
-            try:
-                if child.is_file():
-                    child.unlink()
-            except OSError:
-                pass
-        try:
-            legacy_dir.rmdir()
-        except OSError:
-            pass
-    except FileNotFoundError:
-        pass
 
-    if moved_any:
-        sys.stderr.write(f"[migration] legacy memory moved to {MEMORY_DIR}\n")
-    _LEGACY_MIGRATED_FLAG.touch()
+def _project_dir() -> Path:
+    """当前 cwd 对应的 projects/<sanitize-cwd> 目录。"""
+    abs_cwd = str(Path.cwd().resolve())
+    return _projects_root() / _project_key(abs_cwd)
+
+
+def _new_session_id() -> str:
+    """微秒级时间戳,字典序就是时间序。
+
+    格式: YYYY-MM-DD-HHMMSS-microseconds
+    例:   2026-07-23-114512-345678
+    """
+    return _dt.datetime.now().strftime("%Y-%m-%d-%H%M%S-%f")
+
+
+def _resolve_session_dir(args) -> Path:
+    """根据 CLI 参数决定 session 目录。
+
+    --session <name>: 用确切名字,撞名报错
+    默认: 新 timestamp session
+    """
+    proj = _project_dir()
+
+    if args.session:
+        sess_dir = proj / args.session
+        if sess_dir.exists():
+            sys.exit(f"[error] session '{args.session}' already exists in this project")
+        sess_dir.mkdir(parents=True)
+        return sess_dir
+
+    # 默认: 新 timestamp session
+    sess_dir = proj / _new_session_id()
+    sess_dir.mkdir(parents=True)
+    return sess_dir
 
 
 def _ensure_memory() -> None:
-    """确保 ~/.codeagent/session.json 存在。"""
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    _migrate_legacy_memory()
-    if not MEMORY_FILE.exists():
-        MEMORY_FILE.write_text("[]", encoding="utf-8")
+    """确保当前 session 目录和文件存在。"""
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    if not SESSION_FILE.exists():
+        SESSION_FILE.write_text("[]", encoding="utf-8")
 
 
 def _append_memory(entry: dict) -> None:
-    """把一条记录 append 到 ~/.codeagent/session.json。失败不阻塞主流程。"""
+    """把一条记录 append 到当前 session 的 session.json。失败不阻塞主流程。"""
     _ensure_memory()
     try:
-        raw = MEMORY_FILE.read_text(encoding="utf-8") or "[]"
+        raw = SESSION_FILE.read_text(encoding="utf-8") or "[]"
         data = json.loads(raw)
         if not isinstance(data, list):
             data = []
@@ -251,7 +245,7 @@ def _append_memory(entry: dict) -> None:
         data = []
     try:
         data.append(entry)
-        MEMORY_FILE.write_text(
+        SESSION_FILE.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -469,7 +463,18 @@ def main():
     ap.add_argument("--quiet", action="store_true", help="suppress per-iter stderr logs")
     ap.add_argument("--no-contexts", action="store_true",
                     help="disable context builders (skip memory recall etc.)")
+    ap.add_argument("--session", metavar="NAME",
+                    help="use a named session (eval, batch); error if it exists")
+
     args = ap.parse_args()
+
+    # 解析 session 目录,设置模块全局
+    global SESSION_DIR, SESSION_FILE
+    SESSION_DIR = _resolve_session_dir(args)
+    SESSION_FILE = SESSION_DIR / "session.json"
+
+    sys.stderr.write(f"[session] {SESSION_DIR.name}\n")
+    sys.stderr.write(f"[session] path: {SESSION_DIR}\n")
 
     env, _ = chat.resolve_settings()
     client, model = chat.make_client(env)
