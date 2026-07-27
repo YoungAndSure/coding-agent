@@ -1,72 +1,133 @@
 #!/usr/bin/env node
-// tui.mjs — 最小可工作的 Ink TUI，把每次输入当 prompt 调 agent.py
+// tui.jsx — Ink TUI 前端，spawn agent.py 一次，IPC 多次。
 //
-// 跑：npm start        或     node tui.mjs
-// 退：Ctrl-C
+// 跑：npm start        或     node tui.jsx
+// 退：Ctrl-C（同时杀 agent）
 //
-// 关键点（你前几条刚学过的）：
-//   - 整个进程里，Ink 只管"画"和"接按键"，
-//     真正的 agent loop 在另一个进程跑（agent.py），TUI 是它的"view 层"。
-//   - TUI 跟 agent.py 的通信 = 把 prompt 通过命令行参数传过去，
-//     把 agent.py 的 stdout 拿回来塞进 React state。
-//   - 所有"显示更新"都走同一套路：事件 → setState → React 自动重画。
+// 协议（与 agent.py REPL）：
+//   stdin : 每行一个 prompt
+//   stdout: 第一行 "READY"，之后每段回复以 "=== END ===" 行结束
+//   stderr: agent verbose 日志（TUI 直接打到终端 stderr，不进 TUI 屏）
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, render, useApp, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { spawn } from 'node:child_process';
 
-// ----------------------------------------------------------------
-// 唯一的状态：3 个变量。整个 UI 都是这 3 个的"投影"。
-// ----------------------------------------------------------------
+const END_SENTINEL = '=== END ===';
+
 function App() {
   const [messages, setMessages] = useState([]);   // 对话历史 [{role, text}, ...]
   const [draft,    setDraft]    = useState('');   // 当前输入框内容
   const [status,   setStatus]   = useState('idle'); // 'idle' | 'thinking'
   const { exit } = useApp();
 
-  // 收到 Ctrl-C 退出
+  // 用 ref 存 agent 进程和"等当前回复"的 promise resolver
+  // —— ref 改不改都不触发重渲染
+  const childRef    = useRef(null);
+  const resolveRef  = useRef(null);
+  const readyResolveRef = useRef(null);
+
+  // Ctrl-C 退出
   useInput((_input, key) => {
     if (key.ctrl && _input === 'c') exit();
   });
 
-  // ----------------------------------------------------------------
-  // 用户按回车时触发：spawn 一个 agent.py 子进程，等它跑完拿 stdout
-  // ----------------------------------------------------------------
+  // ------------------------------------------------------------
+  // App 挂载时启动 agent（一次），卸载时 kill
+  // ------------------------------------------------------------
+  useEffect(() => {
+    const child = spawn('python3', ['src/code_agent/exec_loop/agent.py', '--quiet'], {
+      cwd: process.cwd(),
+    });
+    childRef.current = child;
+
+    // 行级 buffer：按行处理 stdout
+    let stdoutBuf = '';
+    let readySeen = false;
+    let replyBuf  = '';
+
+    function processLine(line) {
+      // 第一行必须是 READY（启动握手）
+      if (!readySeen) {
+        if (line === 'READY') {
+          readySeen = true;
+          if (readyResolveRef.current) {
+            readyResolveRef.current();
+            readyResolveRef.current = null;
+          }
+        }
+        return;
+      }
+
+      // END 哨兵 = 回复结束
+      if (line === END_SENTINEL) {
+        if (resolveRef.current) {
+          resolveRef.current(replyBuf.replace(/\n$/, ''));
+          replyBuf = '';
+          resolveRef.current = null;
+        }
+        return;
+      }
+
+      // 普通行 = 累积到当前回复
+      replyBuf += line + '\n';
+    }
+
+    child.stdout.on('data', (chunk) => {
+      stdoutBuf += chunk.toString('utf8');
+      let nl;
+      while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
+        const line = stdoutBuf.slice(0, nl);
+        stdoutBuf = stdoutBuf.slice(nl + 1);
+        processLine(line);
+      }
+    });
+
+    // agent 的 verbose 日志直接打到 TUI 的 stderr（终端可见，Ink 屏幕外）
+    child.stderr.on('data', (c) => process.stderr.write(c));
+
+    // 进程死了：未 resolve 的 submit 收尸
+    child.on('exit', (code) => {
+      if (resolveRef.current) {
+        resolveRef.current(`[agent exited with code ${code}]`);
+        resolveRef.current = null;
+      }
+      if (!readySeen && readyResolveRef.current) {
+        readyResolveRef.current();
+        readyResolveRef.current = null;
+      }
+    });
+
+    // App 卸载 → 杀 agent
+    return () => {
+      try { child.kill('SIGTERM'); } catch (_) {}
+    };
+  }, []);
+
+  // ------------------------------------------------------------
+  // 用户按回车：写 prompt 到 agent stdin，等 END 后拿回复
+  // ------------------------------------------------------------
   const onSubmit = async (prompt) => {
     if (!prompt.trim() || status === 'thinking') return;
 
-    // 1) 把用户消息推进历史
     setMessages((m) => [...m, { role: 'user', text: prompt }]);
-    setDraft('');                            // 清空输入框
+    setDraft('');
     setStatus('thinking');
 
-    // 2) 开一个 agent.py 子进程（这就是"前后端"——只是用 fork/exec 通信）
-    let stdout = '', stderr = '';
-    try {
-      const child = spawn('python3', ['src/code_agent/exec_loop/agent.py', '--quiet', prompt], {
-        cwd: process.cwd(),
-      });
-      child.stdout.on('data', (c) => { stdout += c; });
-      child.stderr.on('data', (c) => { stderr += c; });
+    // 等 agent 回复（END 哨兵触发 resolve；进程死了也会 resolve）
+    const reply = await new Promise((resolve) => {
+      resolveRef.current = resolve;
+      childRef.current.stdin.write(prompt + '\n');
+    });
 
-      const code = await new Promise((resolve) => child.on('close', resolve));
-      const reply = code === 0
-        ? (stdout.trim() || '(no response)')
-        : `[exit ${code}] ${(stderr || stdout).trim()}`;
-
-      // 3) 把 agent 的回复推进历史 → setState 触发 React 重画
-      setMessages((m) => [...m, { role: 'assistant', text: reply }]);
-    } catch (e) {
-      setMessages((m) => [...m, { role: 'assistant', text: `Error: ${e.message}` }]);
-    } finally {
-      setStatus('idle');
-    }
+    setMessages((m) => [...m, { role: 'assistant', text: reply || '(no response)' }]);
+    setStatus('idle');
   };
 
-  // ----------------------------------------------------------------
-  // render：把 state 画到屏幕。每个 <Box> / <Text> 内部就是拼 ANSI 串。
-  // ----------------------------------------------------------------
+  // ------------------------------------------------------------
+  // render：把 state 画到屏幕
+  // ------------------------------------------------------------
   return (
     <Box flexDirection="column">
 

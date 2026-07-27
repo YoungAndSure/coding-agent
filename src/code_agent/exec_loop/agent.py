@@ -343,6 +343,7 @@ def agent_loop(
     model: str,
     user_prompt: str,
     *,
+    messages: list[dict] | None = None,
     max_iters: int = 50,
     system: str = SYSTEM_PROMPT,
     verbose: bool = True,
@@ -351,13 +352,19 @@ def agent_loop(
     """
     跑完整 tool-use 循环，返回最后一条纯文本回答。
 
+    messages: 历史消息列表。如果为 None,创建新对话;否则 append 本轮 user_prompt。
+    持续 append assistant + user(tool_results) 到 messages 末尾。
+    REPL 模式下,外部持续复用同一个 messages,实现多轮上下文。
+
     协议（Anthropic / MiniMax 兼容）：
       1. 发起请求，附上 tools 列表
       2. assistant 消息原样进历史（保留 text + tool_use blocks）
       3. 若有 tool_use block → 每个都执行 → 把 tool_result 装进一条 user 消息
       4. 跳回 1，直到响应里没有 tool_use / 达到 max_iters / stop_reason=end_turn
     """
-    messages: list[dict] = [{"role": "user", "content": user_prompt}]
+    if messages is None:
+        messages = []
+    messages.append({"role": "user", "content": user_prompt})
     last_text = ""
 
     for i in range(1, max_iters + 1):
@@ -454,11 +461,75 @@ def agent_loop(
     return last_text or f"[agent] hit max_iters={max_iters}, no final text"
 
 
+# ---------- REPL ----------
+# 协议（与 TUI / 其他前端 的 IPC）：
+#   stdin : 每行一个 prompt
+#   stdout: 最终回复（多行），以一行 "=== END ===" 结尾
+#   stderr: verbose 日志（[iter] / [tool] / [contexts] 等），TUI 可显示给用户
+#
+# 错误处理：
+#   - 任何异常都进 stdout 作为回复内容
+#   - 不会因异常退出 REPL（除了 stdin EOF / 显式 exit）
+#   - 进程死亡时 TUI 通过 stdout EOF 检测
+
+_END_SENTINEL = "=== END ==="
+
+
+def _repl_loop(
+    client,
+    model: str,
+    *,
+    max_iters: int = 50,
+    system: str = SYSTEM_PROMPT,
+    verbose: bool = True,
+    contexts: list[ContextBuilder] | None = None,
+) -> None:
+    """
+    REPL 模式：从 stdin 读 prompt，跑 agent_loop，把结果写到 stdout。
+    直到 stdin EOF / 用户输入 exit/quit 才退出。
+    """
+    # 告诉前端"我准备好了"
+    print("READY", flush=True)
+
+    messages: list[dict] = []  # 跨 turn 累积
+
+    for line in sys.stdin:
+        prompt = line.rstrip("\n")
+        if prompt in ("exit", "quit"):
+            break
+        if not prompt.strip():
+            # 空行忽略
+            continue
+
+        # 这一轮加 user prompt 到 messages,跑完后 messages 自动包含所有 iters
+        try:
+            final_text = agent_loop(
+                client, model, prompt,
+                messages=messages,
+                max_iters=max_iters,
+                system=system,
+                verbose=verbose,
+                contexts=contexts,
+            )
+        except Exception as e:
+            # 任何异常都进 stdout 作为回复 —— TUI 必须能看到
+            final_text = f"[agent error] {type(e).__name__}: {e}"
+
+        # 写回复 + 结束标志
+        print(final_text, flush=True)
+        print(_END_SENTINEL, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="Tool-use agent loop on MiniMax (Anthropic-compatible)."
+        description="Tool-use agent loop on MiniMax (Anthropic-compatible). "
+                    "Default: REPL mode (reads prompts from stdin). "
+                    "-q/--headless: one-shot mode (one prompt from arg, then exit)."
     )
-    ap.add_argument("prompt", help="User prompt")
+    ap.add_argument("prompt", nargs="?", default=None,
+                    help="User prompt (only used in -q headless mode)")
+    ap.add_argument("-q", "--headless", action="store_true",
+                    help="headless one-shot mode: process prompt and exit")
     ap.add_argument("--max-iters", type=int, default=50)
     ap.add_argument("--quiet", action="store_true", help="suppress per-iter stderr logs")
     ap.add_argument("--no-contexts", action="store_true",
@@ -479,13 +550,29 @@ def main():
     env, _ = chat.resolve_settings()
     client, model = chat.make_client(env)
     ctxs: list[ContextBuilder] | None = [] if args.no_contexts else None
-    final = agent_loop(
-        client, model, args.prompt,
-        max_iters=args.max_iters,
-        verbose=not args.quiet,
-        contexts=ctxs,
-    )
-    print(final)
+    verbose = not args.quiet
+
+    # 模式分发
+    if args.headless or args.prompt is not None:
+        # one-shot: 必须有 prompt
+        if args.prompt is None:
+            sys.exit("[error] -q requires a positional prompt")
+        final = agent_loop(
+            client, model, args.prompt,
+            messages=None,
+            max_iters=args.max_iters,
+            verbose=verbose,
+            contexts=ctxs,
+        )
+        print(final, flush=True)
+    else:
+        # REPL: 多次 prompt,跨 turn 累积 messages
+        _repl_loop(
+            client, model,
+            max_iters=args.max_iters,
+            verbose=verbose,
+            contexts=ctxs,
+        )
 
 
 if __name__ == "__main__":
