@@ -164,14 +164,14 @@ def build_contexts(contexts: list[ContextBuilder] | None = None) -> str:
 
 
 # ---------- Session 系统 ----------
-# 设计: 每次启动 = 一个新 session,放 ~/.codeagent/projects/<sanitize-cwd>/<timestamp>/session.json。
+# 设计: 每次启动 = 一个新 session 文件,放 ~/.codeagent/projects/<sanitize-cwd>/<timestamp>.json。
 #      - 项目目录: abs_cwd 把 / 替成 - (保留前导 -,因为绝对路径以 / 开头)
-#      - session id: 微秒级时间戳,YYYY-MM-DD-HHMMSS-microseconds,字典序就是时间序
+#      - session 文件: <sanitize-cwd>/<timestamp>.json (扁平,不再嵌一层子目录)
 #      - 每次默认开新 session,不接续(不实现 --continue / --resume)
 #
 # 这两个变量在 main() 里被覆盖;这里只是占位,让模块能 import。
-SESSION_DIR: Path = Path.home() / ".codeagent"
-SESSION_FILE: Path = SESSION_DIR / "session.json"
+PROJECT_DIR: Path = Path.home() / ".codeagent" / "projects"
+SESSION_FILE: Path = PROJECT_DIR / "placeholder.json"  # main() 里重设
 
 
 def _project_key(abs_cwd: str) -> str:
@@ -205,30 +205,33 @@ def _new_session_id() -> str:
     return _dt.datetime.now().strftime("%Y-%m-%d-%H%M%S-%f")
 
 
-def _resolve_session_dir(args) -> Path:
-    """根据 CLI 参数决定 session 目录。
+def _resolve_session(args) -> Path:
+    """根据 CLI 参数决定 session 文件路径。
 
     --session <name>: 用确切名字,撞名报错
-    默认: 新 timestamp session
+    默认: 新 timestamp session 文件
+
+    返回: <project_dir>/<session_id>.json
     """
     proj = _project_dir()
 
     if args.session:
-        sess_dir = proj / args.session
-        if sess_dir.exists():
-            sys.exit(f"[error] session '{args.session}' already exists in this project")
-        sess_dir.mkdir(parents=True)
-        return sess_dir
+        sess_id = args.session
+    else:
+        sess_id = _new_session_id()
 
-    # 默认: 新 timestamp session
-    sess_dir = proj / _new_session_id()
-    sess_dir.mkdir(parents=True)
-    return sess_dir
+    sess_file = proj / f"{sess_id}.json"
+    if sess_file.exists():
+        sys.exit(f"[error] session '{sess_id}' already exists in this project")
+
+    # 立即创建 project dir,文件在第一次写时才创建
+    proj.mkdir(parents=True, exist_ok=True)
+    return sess_file
 
 
 def _ensure_memory() -> None:
-    """确保当前 session 目录和文件存在。"""
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    """确保当前 session 文件存在。"""
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not SESSION_FILE.exists():
         SESSION_FILE.write_text("[]", encoding="utf-8")
 
@@ -539,13 +542,12 @@ def main():
 
     args = ap.parse_args()
 
-    # 解析 session 目录,设置模块全局
-    global SESSION_DIR, SESSION_FILE
-    SESSION_DIR = _resolve_session_dir(args)
-    SESSION_FILE = SESSION_DIR / "session.json"
+    # 解析 session 文件,设置模块全局
+    global SESSION_FILE
+    SESSION_FILE = _resolve_session(args)
 
-    sys.stderr.write(f"[session] {SESSION_DIR.name}\n")
-    sys.stderr.write(f"[session] path: {SESSION_DIR}\n")
+    sys.stderr.write(f"[session] {SESSION_FILE.stem}\n")
+    sys.stderr.write(f"[session] path: {SESSION_FILE}\n")
 
     env, _ = chat.resolve_settings()
     client, model = chat.make_client(env)
