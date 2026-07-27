@@ -220,7 +220,7 @@ def _resolve_session(args) -> Path:
     else:
         sess_id = _new_session_id()
 
-    sess_file = proj / f"{sess_id}.json"
+    sess_file = proj / f"{sess_id}.jsonl"
     if sess_file.exists():
         sys.exit(f"[error] session '{sess_id}' already exists in this project")
 
@@ -230,30 +230,27 @@ def _resolve_session(args) -> Path:
 
 
 def _ensure_memory() -> None:
-    """确保当前 session 文件存在。"""
+    """确保当前 session 文件所在的目录存在。文件在第一次 append 时才创建。"""
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not SESSION_FILE.exists():
-        SESSION_FILE.write_text("[]", encoding="utf-8")
 
 
 def _append_memory(entry: dict) -> None:
-    """把一条记录 append 到当前 session 的 session.json。失败不阻塞主流程。"""
+    """把一条记录作为一行 JSON append 到 session 文件。失败不阻塞主流程。
+
+    O(1) per append —— 不读不解析整个文件,直接追加一行。
+    fail-soft:序列化失败或写失败 → stderr 警告,主流程继续。
+    """
     _ensure_memory()
     try:
-        raw = SESSION_FILE.read_text(encoding="utf-8") or "[]"
-        data = json.loads(raw)
-        if not isinstance(data, list):
-            data = []
-    except (json.JSONDecodeError, OSError):
-        data = []
+        line = json.dumps(entry, ensure_ascii=False)
+    except (TypeError, ValueError) as e:  # noqa: BLE001
+        sys.stderr.write(f"[session.jsonl] serialize error: {type(e).__name__}: {e}\n")
+        return
     try:
-        data.append(entry)
-        SESSION_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with open(SESSION_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
     except OSError as e:  # noqa: BLE001 - 写失败不阻塞主流程
-        sys.stderr.write("[session.json] write failed: " + type(e).__name__ + ": " + str(e) + chr(10))
+        sys.stderr.write(f"[session.jsonl] write failed: {type(e).__name__}: {e}\n")
 
 
 

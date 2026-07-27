@@ -1,10 +1,12 @@
-"""contexts.memory - 从 session.json 里捞最近 10 条对话,作为 context 喂给 LLM。
+"""contexts.memory - 从 session.jsonl 里捞最近 10 条对话,作为 context 喂给 LLM。
 
 约定:
     - 继承 base.ContextBuilder
     - title = "recent conversations"
     - build() 返回一段纯文本,列出最近 10 条 (request, response) 对话
-    - 只读 session.json,失败时返回空串,不影响主流程
+    - 只读 session.jsonl,失败时返回空串,不影响主流程
+
+格式:每行一个 JSON object,append-only 写入。
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from .base import ContextBuilder
 
 
 class RecentConversationsContext(ContextBuilder):
-    """从 session.json 读取最近 N 轮对话,按时间正序展示。"""
+    """从 session.jsonl 流式读取最近 N 轮对话,按时间正序展示。"""
 
     title = "recent conversations"
 
@@ -30,20 +32,29 @@ class RecentConversationsContext(ContextBuilder):
         except Exception:
             return ""
 
+        # 流式读:逐行 parse,坏行跳过
+        entries: list[dict] = []
         try:
-            raw = Path(SESSION_FILE).read_text(encoding="utf-8") or "[]"
-            data = json.loads(raw)
-        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            with open(SESSION_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(e, dict):
+                        entries.append(e)
+        except (OSError, ValueError, TypeError):
             return ""
 
-        if not isinstance(data, list) or not data:
+        if not entries:
             return ""
 
-        # 按时序正序排列(已 append 的天然就是时序)
+        # 按 iter 配对 request/response
         by_iter: dict[int, dict[str, dict]] = {}
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
+        for entry in entries:
             it = entry.get("iter")
             kind = entry.get("kind")
             if not isinstance(it, int) or kind not in ("request", "response"):
